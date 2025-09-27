@@ -55,41 +55,36 @@ IMU_test_1.siz \
 
 
 # All Target
-all: IMU_test_1 secondary-outputs
+all: IMU_test_1.elf secondary-outputs
 
 # Tool invocations
-IMU_test_1: $(OBJS) $(USER_OBJS)
+IMU_test_1.elf: $(OBJS) $(USER_OBJS)
 	@echo 'Building target: $@'
 	@echo 'Invoking: Cross ARM GNU C++ Linker'
-	arm-none-eabi-g++ -mcpu=cortex-m3 -mthumb -Og -fmessage-length=0 -fsigned-char -ffunction-sections -fdata-sections -ffreestanding -fno-move-loop-invariants -Wall -Wextra  -g3 -T mem.ld -T libs.ld -T sections.ld -nostartfiles -Xlinker --gc-sections -L"../ldscripts" -Wl,-Map,"IMU_test_1.map" --specs=nano.specs -o "IMU_test_1" $(OBJS) $(USER_OBJS) $(LIBS)
+	arm-none-eabi-g++ -mcpu=cortex-m3 -mthumb -O2  -g -Wl,-Map,"IMU_test_1.map" -o "IMU_test_1.elf" $(OBJS) $(USER_OBJS) $(LIBS)
 	@echo 'Finished building target: $@'
 	@echo ' '
-	$(MAKE) --no-print-directory post-build
 
-IMU_test_1.hex: IMU_test_1
+IMU_test_1.hex: IMU_test_1.elf
 	@echo 'Invoking: Cross ARM GNU Create Flash Image'
-	arm-none-eabi-objcopy -O ihex "IMU_test_1"  "IMU_test_1.hex"
+	arm-none-eabi-objcopy -O ihex "IMU_test_1.elf"  "IMU_test_1.hex"
 	@echo 'Finished building: $@'
 	@echo ' '
 
-IMU_test_1.siz: IMU_test_1
+IMU_test_1.siz: IMU_test_1.elf
 	@echo 'Invoking: Cross ARM GNU Print Size'
-	arm-none-eabi-size --format=berkeley -x "IMU_test_1"
+	arm-none-eabi-size --format=berkeley "IMU_test_1.elf"
 	@echo 'Finished building: $@'
 	@echo ' '
 
 # Other Targets
 clean:
-	-$(RM) $(CC_DEPS)$(C++_DEPS)$(OBJS)$(C_UPPER_DEPS)$(CXX_DEPS)$(SECONDARY_FLASH)$(SECONDARY_SIZE)$(ASM_DEPS)$(S_UPPER_DEPS)$(C_DEPS)$(CPP_DEPS) IMU_test_1
-	-@echo ' '
-
-post-build:
-	-"" -O ihex "IMU_test_1" "IMU_test_1.hex"
+	-$(RM) $(CC_DEPS)$(C++_DEPS)$(OBJS)$(C_UPPER_DEPS)$(CXX_DEPS)$(SECONDARY_FLASH)$(SECONDARY_SIZE)$(ASM_DEPS)$(S_UPPER_DEPS)$(C_DEPS)$(CPP_DEPS) IMU_test_1.elf
 	-@echo ' '
 
 secondary-outputs: $(SECONDARY_FLASH) $(SECONDARY_SIZE)
 
 .PHONY: all clean dependents
-.SECONDARY: post-build
+.SECONDARY:
 
 -include ../makefile.targets

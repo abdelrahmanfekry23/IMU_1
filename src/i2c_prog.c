@@ -1,175 +1,129 @@
 /* prog.c */
-#include "config.h"
-#include "interface.h"
+#include "i2c_config.h"
+#include "i2c_interface.h"
 
+static void tiny_delay(volatile unsigned int t){ while(t--){ __asm__ volatile("nop"); } }
+
+static void i2c1_timing_stdmode(void)
+{
+    unsigned int freq_mhz = (PCLK1_HZ + 999999U)/1000000U;
+    if (freq_mhz < 2U)  freq_mhz = 2U;
+    if (freq_mhz > 36U) freq_mhz = 36U;
+    I2C1_CR2   = freq_mhz;
+
+    /* Standard-mode: CCR ~= PCLK1/(2*I2C_SPEED) */
+    unsigned int ccr = (PCLK1_HZ + (2U*I2C_SPEED_HZ-1U)) / (2U*I2C_SPEED_HZ);
+    if (ccr < 4U)     ccr = 4U;
+    if (ccr > 0xFFFU) ccr = 0xFFFU;
+    I2C1_CCR   = ccr;
+
+    /* TRISE(SM) = FREQ(MHz) + 1 */
+    I2C1_TRISE = freq_mhz + 1U;
+}
 
 void I2C1_Init(void)
 {
-    unsigned int tmp;
-    unsigned int freq_mhz;
-    unsigned int ccr;
-
-    /* 1) Enable clocks */
-    SET_BITS(RCC_APB2ENR, RCC_APB2ENR_AFIOEN | RCC_APB2ENR_IOPBEN);
+    /* Clocks */
+    SET_BITS(RCC_APB2ENR, RCC_APB2ENR_AFIOEN);
+    SET_BITS(RCC_APB2ENR, RCC_APB2ENR_IOPBEN);
     SET_BITS(RCC_APB1ENR, RCC_APB1ENR_I2C1EN);
 
-    /* 2) Use default mapping PB6/PB7 */
-    CLR_BITS(AFIO_MAPR, AFIO_MAPR_I2C1_REMAP);
+    /* PB6/PB7 = AF Open-Drain 50MHz (0xB per nibble) */
+    GPIOB_CRL &= ~((GPIO_CRL_NIBBLE_MASK << (6U*4U)) |
+                   (GPIO_CRL_NIBBLE_MASK << (7U*4U)));
+    GPIOB_CRL |=  ((unsigned int)GPIO_MODE_AF_OD_50MHz << (6U*4U)) |
+                  ((unsigned int)GPIO_MODE_AF_OD_50MHz << (7U*4U));
 
-    /* 3) GPIO config: PB6/PB7 = AF Open-Drain @ 50MHz */
-    GPIOB_CRL &= ~((GPIO_CRL_NIBBLE_MASK << GPIO_CRL_PB6_Pos) |
-                   (GPIO_CRL_NIBBLE_MASK << GPIO_CRL_PB7_Pos));
-    GPIOB_CRL |=  ((GPIO_MODE_AF_OD_50MHz << GPIO_CRL_PB6_Pos) |
-                   (GPIO_MODE_AF_OD_50MHz << GPIO_CRL_PB7_Pos));
-
-    /* 4) Clean reset */
+    /* Reset */
     SET_BITS(I2C1_CR1, I2C_CR1_SWRST);
     CLR_BITS(I2C1_CR1, I2C_CR1_SWRST);
 
-    /* 5) Disable peripheral while configuring */
-    CLR_BITS(I2C1_CR1, I2C_CR1_PE);
+    /* Timing */
+    i2c1_timing_stdmode();
 
-    /* 6) CR2.FREQ = APB1 frequency in MHz (max 63) */
-    freq_mhz = (PCLK1_HZ / 1000000U) & 0x3FU;
-    tmp = I2C1_CR2 & ~I2C_CR2_FREQ_Msk;
-    I2C1_CR2 = tmp | (freq_mhz << I2C_CR2_FREQ_Pos);
-
-    /* 7) CCR/TRISE */
-    if (I2C_SPEED_HZ <= 100000U)
-    {
-        /* Standard mode 100k: CCR = PCLK1/(2*speed), min 4 */
-        ccr = PCLK1_HZ / (2U * I2C_SPEED_HZ);
-        if (ccr < 4U) ccr = 4U;
-        I2C1_CCR = ccr;              /* FS=0 */
-        I2C1_TRISE = freq_mhz + 1U;  /* SM: TRISE = FREQ+1 */
-    }
-    else
-    {
-        /* Fast mode 400k (duty=2): CCR = PCLK1/(3*speed) */
-        ccr = PCLK1_HZ / (3U * I2C_SPEED_HZ);
-        if (ccr == 0U) ccr = 1U;
-        I2C1_CCR = I2C_CCR_FS | ccr;                /* FS=1, DUTY=0 */
-        I2C1_TRISE = ((freq_mhz * 3U) / 10U) + 1U;  /* ~300ns + 1 */
-        if (I2C1_TRISE == 0U) I2C1_TRISE = 1U;
-    }
-
-    /* 8) ACK on by default */
-    SET_BITS(I2C1_CR1, I2C_CR1_ACK);
-
-    /* 9) Enable peripheral */
+    /* Enable */
     SET_BITS(I2C1_CR1, I2C_CR1_PE);
+    tiny_delay(500U);
 }
 
-/* ---- I2C1_WaitBusFree ----
-   Wait until SR2.BUSY == 0
-   Return: 0 OK, -1 timeout
-*/
-int I2C1_WaitBusFree(void)
+void I2C1_Start(void)
 {
-    unsigned int t = I2C_TIMEOUT;
-    while ((I2C1_SR2 & I2C_SR2_BUSY) && (--t)) { }
-    return (t == 0U) ? -1 : 0;
-}
-
-/* ---- I2C1_Start ----
-   Generate START and wait for SR1.SB
-   Return: 0 OK, -1 timeout
-*/
-int I2C1_Start(void)
-{
-    unsigned int t;
-
-    if (I2C1_WaitBusFree() != 0) return -1;
-
+    volatile unsigned int t = I2C_TIMEOUT;
     SET_BITS(I2C1_CR1, I2C_CR1_START);
-
-    t = I2C_TIMEOUT;
-    while (!(I2C1_SR1 & I2C_SR1_SB) && (--t)) { }
-    return (t == 0U) ? -1 : 0;
+    while (!(I2C1_SR1 & I2C_SR1_SB)) { if(--t==0U) break; }
+    (void)I2C1_SR1; /* clear SB via SR1 read before DR write */
 }
 
-/* ---- I2C1_SendAddress ----
-   Send 7-bit address + R/W
-   Wait for SR1.ADDR, then clear by reading SR1 and SR2.
-   Return: 0 OK, -1 timeout
-*/
-int I2C1_SendAddress(unsigned int addr7, int read)
+int I2C1_Address(unsigned char addr7, int dir)
 {
-    unsigned int t;
-
-    I2C1_DR = ((addr7 & 0x7FU) << 1) | (read ? 1U : 0U);
-
-    t = I2C_TIMEOUT;
-    while (!(I2C1_SR1 & I2C_SR1_ADDR) && (--t)) { }
-    if (t == 0U) return -1;
-
-    (void)I2C1_SR1;
-    (void)I2C1_SR2;
+    volatile unsigned int t = I2C_TIMEOUT;
+    I2C1_DR = ((unsigned int)(addr7 << 1)) | ((dir & 1) ? 1U : 0U);
+    while (!(I2C1_SR1 & I2C_SR1_ADDR)) {
+        if (I2C1_SR1 & I2C_SR1_AF) { CLR_BITS(I2C1_SR1, I2C_SR1_AF); return -1; }
+        if (--t == 0U) return -2; /* timeout */
+    }
+    (void)I2C1_SR1; (void)I2C1_SR2; /* clear ADDR */
     return 0;
 }
 
-/* ---- I2C1_WriteByte ----
-   Write one data byte and wait for TXE=1
-   Return: 0 OK, -1 timeout
-*/
-int I2C1_WriteByte(unsigned int byte_val)
+int I2C1_WriteByte(unsigned char data)
 {
-    unsigned int t;
+    volatile unsigned int t;
 
-    I2C1_DR = (byte_val & 0xFFU);
-
+    /* wait TXE */
     t = I2C_TIMEOUT;
-    while (!(I2C1_SR1 & I2C_SR1_TXE) && (--t)) { }
-    return (t == 0U) ? -1 : 0;
+    while (!(I2C1_SR1 & I2C_SR1_TXE)) { if(--t==0U) return -1; }
+
+    I2C1_DR = data;
+
+    /* wait BTF (byte transfer finished) */
+    t = I2C_TIMEOUT;
+    while (!(I2C1_SR1 & I2C_SR1_BTF)) {
+        if (I2C1_SR1 & I2C_SR1_AF) { CLR_BITS(I2C1_SR1, I2C_SR1_AF); return -2; }
+        if (--t == 0U) return -3;
+    }
+    return 0;
 }
 
-/* ---- I2C1_ReadByte_ACK ----
-   Ensure ACK=1, wait RXNE=1, read DR
-   Return: 0 OK, -1 timeout
-*/
-int I2C1_ReadByte_ACK(unsigned int *out_byte)
+unsigned char I2C1_ReadAck(void)
 {
-    unsigned int t;
-    if (!out_byte) return -1;
-
+    volatile unsigned int t = I2C_TIMEOUT;
     SET_BITS(I2C1_CR1, I2C_CR1_ACK);
-
-    t = I2C_TIMEOUT;
-    while (!(I2C1_SR1 & I2C_SR1_RXNE) && (--t)) { }
-    if (t == 0U) return -1;
-
-    *out_byte = (I2C1_DR & 0xFFU);
-    return 0;
+    while (!(I2C1_SR1 & I2C_SR1_RXNE)) { if(--t==0U) break; }
+    return (unsigned char)I2C1_DR;
 }
 
-/* ---- I2C1_ReadByte_NACK ----
-   For the last byte: set ACK=0 (NACK), wait RXNE, issue STOP, read DR,
-   then restore ACK=1.
-   Return: 0 OK, -1 timeout
-*/
-int I2C1_ReadByte_NACK(unsigned int *out_byte)
+unsigned char I2C1_ReadNack(void)
 {
-    unsigned int t;
-    if (!out_byte) return -1;
-
-    CLR_BITS(I2C1_CR1, I2C_CR1_ACK);  /* NACK */
-
-    t = I2C_TIMEOUT;
-    while (!(I2C1_SR1 & I2C_SR1_RXNE) && (--t)) { }
-    if (t == 0U) return -1;
-
-    SET_BITS(I2C1_CR1, I2C_CR1_STOP); /* STOP for last byte */
-
-    *out_byte = (I2C1_DR & 0xFFU);
-
-    SET_BITS(I2C1_CR1, I2C_CR1_ACK);  /* restore ACK */
-    return 0;
+    volatile unsigned int t = I2C_TIMEOUT;
+    CLR_BITS(I2C1_CR1, I2C_CR1_ACK);
+    SET_BITS(I2C1_CR1, I2C_CR1_STOP);
+    while (!(I2C1_SR1 & I2C_SR1_RXNE)) { if(--t==0U) break; }
+    return (unsigned char)I2C1_DR;
 }
 
-/* ---- I2C1_Stop ----
-   Generate STOP (HW clears it after the condition).
-*/
 void I2C1_Stop(void)
 {
     SET_BITS(I2C1_CR1, I2C_CR1_STOP);
+    tiny_delay(100U);
+}
+
+int I2C1_Probe(unsigned char addr7)
+{
+    I2C1_Start();
+    if (I2C1_Address(addr7, 0) == 0) { I2C1_Stop(); return 1; }
+    I2C1_Stop();
+    return 0;
+}
+
+int I2C1_ReadReg1(unsigned char addr7, unsigned char reg, unsigned char *val)
+{
+    if (!val) return -1;
+    I2C1_Start();
+    if (I2C1_Address(addr7, 0) != 0) { I2C1_Stop(); return -2; }
+    if (I2C1_WriteByte(reg) != 0)    { I2C1_Stop(); return -3; }
+    I2C1_Start();
+    if (I2C1_Address(addr7, 1) != 0) { I2C1_Stop(); return -4; }
+    *val = I2C1_ReadNack();          /* STOP inside ReadNack */
+    return 0;
 }
